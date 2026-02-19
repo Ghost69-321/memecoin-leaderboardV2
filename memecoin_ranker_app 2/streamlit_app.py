@@ -1,5 +1,6 @@
 # streamlit_app.py
 import os
+import random
 import time
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
@@ -51,7 +52,6 @@ class Coin(BaseModel):
 # HTTP + Retry
 # ------------------------
 def backoff_sleep(attempt: int) -> float:
-    import random
     base = min(2 ** attempt, 32)
     return base + random.uniform(0, 0.5)
 
@@ -90,11 +90,12 @@ def fetch_memecoins(
     url = f"{base}{API_ENDPOINT}"
 
     last_err = None
-    for attempt in range(1, max_attempts + 1):
-        try:
-            with make_client(timeout_s=settings["timeout_s"]) as client:
+    with make_client(timeout_s=settings["timeout_s"]) as client:
+        for attempt in range(1, max_attempts + 1):
+            try:
                 r = client.get(url, headers=build_headers(token, auth_mode), params=params)
                 if r.status_code == 429:
+                    last_err = RuntimeError(f"Rate limited (HTTP 429) on attempt {attempt}")
                     time.sleep(backoff_sleep(attempt))
                     continue
                 try:
@@ -104,15 +105,17 @@ def fetch_memecoins(
                     preview = r.text[:300].replace(token, "***")
                     raise RuntimeError(f"HTTP {r.status_code} {url} → {preview}") from he
                 return r.json()
-        except httpx.HTTPError as e:
-            last_err = e
-            time.sleep(backoff_sleep(attempt))
+            except httpx.HTTPError as e:
+                last_err = e
+                time.sleep(backoff_sleep(attempt))
     raise RuntimeError(f"Failed to fetch data after {max_attempts} attempts: {last_err}")
+
+CACHE_TTL_S = int(os.getenv("CACHE_TTL_S", 300))
 
 # ------------------------
 # Caching layer
 # ------------------------
-@st.cache_data(show_spinner=False, ttl=300)
+@st.cache_data(show_spinner=False, ttl=CACHE_TTL_S)
 def cached_fetch(
     base_url: str,
     token: str,
@@ -235,10 +238,12 @@ def parse_csv_list(s: str) -> List[str]:
 allow = set(parse_csv_list(allow_list))
 deny = set(parse_csv_list(deny_list))
 
-if allow:
-    df = df[df["symbol"].str.upper().isin(allow)]
-if deny:
-    df = df[~df["symbol"].str.upper().isin(deny)]
+if allow or deny:
+    symbols_upper = df["symbol"].str.upper()
+    if allow:
+        df = df[symbols_upper.isin(allow)]
+    if deny:
+        df = df[~symbols_upper.isin(deny)]
 
 # Sort client-side to be safe
 if sort_field == "galaxy_score":
